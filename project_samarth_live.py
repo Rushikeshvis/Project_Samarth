@@ -8,7 +8,7 @@ import json
 # !! IMPORTANT !!
 # This is the "Production URL" from your n8n Webhook node
 # Make sure your n8n workflow is "Active"
-N8N_WEBHOOK_URL = "https://ghost-n8n-4baj.onrender.com/webhook/samarth-query" 
+N8N_WEBHOOK_URL = "https://ghost-n8n-4baj.onrender.com/webhook/samarth-query"
 # -----------------------------------------------------------------
 
 st.set_page_config(layout="wide", page_title="Project Samarth (n8n)")
@@ -33,7 +33,8 @@ api_key_input = st.text_input(
 
 def analyze_tax_data(df, query):
     try:
-        df = df.apply(pd.to_numeric, errors='ignore')
+        # F-ixed: 'df' was being modified but not all code paths used the new numeric df.
+        # Best to create a new df for numeric conversion right before analysis.
         
         states_to_find = []
         if "telangana" in query:
@@ -65,6 +66,7 @@ def analyze_tax_data(df, query):
 
         analysis_df = filtered_df[cols_to_sum].copy()
         
+        # Apply numeric conversion here, just to the columns needed
         analysis_df[years_to_find] = analysis_df[years_to_find].apply(pd.to_numeric, errors='coerce').fillna(0)
         
         analysis_df['Total_Devolution_ (2016-18)'] = analysis_df[years_to_find].sum(axis=1)
@@ -85,8 +87,7 @@ def analyze_generic_data(df, title):
 if prompt := st.chat_input("Ask a question, e.g., 'Share of Union Taxes'"):
     if not api_key_input:
         st.error("Please enter your data.gov.in API key.")
-    elif N8N_WEBHOOK_URL == "YOUR_N8N_PRODUCTION_URL_HERE":
-        st.error("Please update the N8N_WEBHOOK_URL in the Python code.")
+    # Removed the check for "YOUR_N8N_PRODUCTION_URL_HERE" since you've filled it in
     else:
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
@@ -130,7 +131,7 @@ if prompt := st.chat_input("Ask a question, e.g., 'Share of Union Taxes'"):
 
                 # *** THIS IS THE NEW, HELPFUL ERROR CHECK ***
                 elif "message" in data and data["message"] == "Workflow was started":
-                    st.error("Error from n8n: The workflow is not 'Active'. Please go to your n8n UI, toggle the workflow to 'Active', and make sure you are using the 'Production URL'.")
+                    st.error("Error from n8n: Received 'Workflow was started' message. This 99% of the time means you are using the 'Test URL' instead of the 'Production URL'. Please go to your n8n Webhook node, copy the 'Production URL', and paste it into the N8N_WEBHOOK_URL variable. (Also, ensure the workflow is 'Active'.)")
                     st.session_state.messages.append({"role": "assistant", "content": "Error: n8n workflow is not Active. Please Activate the workflow in the n8n UI."})
 
                 else:
