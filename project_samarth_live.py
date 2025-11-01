@@ -1,128 +1,92 @@
 import streamlit as st
-import pandas as pd
 import requests
+import pandas as pd
 import re
+import json
 
-class LocalLLM:
-    def __init__(self):
-        self.column_aliases = {
-            "state": ["state", "statename", "state_name"],
-            "district": ["district", "districtname", "district_name"],
-            "year": ["year", "year_code", "financial_year"],
-            "crop": ["crop", "crop_name", "commodity"],
-            "production": ["production", "production_volume_tonnes", "production_metric_tonnes", "value", "yield"],
-            "rainfall": ["rainfall", "avg_annual_rainfall_mm", "actual_rainfall", "rainfall_mm"]
-        }
+# -----------------------------------------------------------------
+# !! IMPORTANT !!
+# This is the "Production URL" from your n8n Webhook node
+# Make sure your n8n workflow is "Active"
+N8N_WEBHOOK_URL = "YOUR_N8N_PRODUCTION_URL_HERE" 
+# -----------------------------------------------------------------
 
-    def _find_col(self, df, col_type):
-        for alias in self.column_aliases.get(col_type, []):
-            for col in df.columns:
-                if alias == col.lower().strip():
-                    return col
-        return None
-
-    def _clean_numeric(self, series):
-        return pd.to_numeric(series.astype(str).str.replace(r'[^\d.]', '', regex=True), errors='coerce')
-
-    def generate(self, user_question, df, dataset_title, resource_id):
-        response = ""
-        question_low = user_question.lower()
-        
-        try:
-            if "tax" in question_low or "duties" in question_low:
-                response = self._analyze_taxes(df, user_question)
-            elif "compare" in question_low and "rainfall" in question_low and "crop" in question_low:
-                response = self._analyze_comparison(df)
-            else:
-                response = self._default_summary(df, dataset_title)
-
-        except Exception as e:
-            response = f"I encountered an error during data synthesis. Error: {e}\n\n"
-            response += self._default_summary(df, dataset_title)
-        
-        citation = f"**{dataset_title}** (Source: {resource_id}, data.gov.in)"
-        return response, [citation]
-
-    def _analyze_taxes(self, df, user_question):
-        response = ""
-        question_low = user_question.lower()
-
-        cols_to_check = [c for c in df.columns if '2016' in c or '2017' in c or '2018' in c]
-        states_to_check = []
-        if "telangana" in question_low:
-            states_to_check.append("Telangana")
-        if "karnataka" in question_low:
-            states_to_check.append("Karnataka")
-        
-        if not states_to_check:
-            states_to_check = ["Telangana", "Karnataka"] 
-        
-        state_col = "state_name"
-        if state_col not in df.columns:
-            return f"Could not find the required 'state_name' column in the dataset. Available columns: {', '.join(df.columns)}"
-
-        df_filtered = df[df[state_col].isin(states_to_check)]
-        
-        if df_filtered.empty:
-            return f"I found the dataset, but could not find data for {', '.join(states_to_check)}."
-            
-        final_cols = [state_col] + cols_to_check
-        df_display = df_filtered[final_cols].set_index(state_col)
-        
-        response = f"**Share of Union Taxes and Duties (in Rs. Crore) for {', '.join(states_to_check)}:**\n\n"
-        response += df_display.to_markdown()
-        
-        return response
-
-    def _analyze_comparison(self, df):
-        response_part = ""
-        rain_col = self._find_col(df, "rainfall")
-        state_col = self._find_col(df, "state")
-        
-        if rain_col and state_col:
-            df[rain_col] = self._clean_numeric(df[rain_col])
-            avg_rain = df.groupby(state_col)[rain_col].mean().reset_index()
-            response_part += "**Average Annual Rainfall Analysis:**\n"
-            for _, row in avg_rain.iterrows():
-                response_part += f"* **{row[state_col]}**: {row[rain_col]:.2f} mm (average)\n"
-        
-        return response_part
-
-    def _default_summary(self, df, dataset_title):
-        response = f"I have successfully retrieved the dataset **'{dataset_title}'**. Here is a summary of the first 5 rows:\n\n"
-        response += f"{df.head().to_markdown(index=False)}\n"
-        return response
-
-st.set_page_config(layout="wide", page_title="Project Samarth")
-st.title("🇮🇳 Project Samarth (n8n Connected)")
-st.markdown("This system uses an n8n workflow for data retrieval and a local LLM for reasoning.")
-
-n8n_url = st.text_input(
-    "Enter your webhook URL",
-    help="Paste the 'Production URL' from your n8n Webhook node."
-)
-
-api_key_input = st.text_input(
-    "Enter your data.gov.in API Key",
-    type="password",
-    help="You must generate a free API key from https://data.gov.in/."
-)
+st.set_page_config(layout="wide", page_title="Project Samarth (n8n)")
+st.title("🇮🇳 Project Samarth (Powered by n8n)")
+st.write("This app uses a live `data.gov.in` API. You must provide your own API key to use it. The n8n workflow must be set to 'Active'.")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-        if "citations" in message and message["citations"]:
-            with st.expander("View Data Source"):
-                st.markdown(message["citations"][0])
+        if isinstance(message["content"], pd.DataFrame):
+            st.dataframe(message["content"], use_container_width=True)
+        else:
+            st.markdown(message["content"])
 
-if prompt := st.chat_input("Ask a question, e.g., 'Share of Union Taxes in Telangana'"):
+api_key_input = st.text_input(
+    "Enter your data.gov.in API Key",
+    type="password",
+    help="Get your API key by registering on data.gov.in"
+)
+
+def analyze_tax_data(df, query):
+    try:
+        df = df.apply(pd.to_numeric, errors='ignore')
+        
+        states_to_find = []
+        if "telangana" in query:
+            states_to_find.append("Telangana")
+        if "karnataka" in query:
+            states_to_find.append("Karnataka")
+
+        if not states_to_find:
+            states_to_find = ["Telangana", "Karnataka"] 
+
+        years_to_find = []
+        year_matches = re.findall(r'(\d{4})', query)
+        if year_matches:
+            years_to_find = [f"{y}-{int(y[2:])+1}" for y in year_matches]
+        
+        if "2016-2018" in query or not years_to_find:
+             years_to_find = ["2016-17", "2017-18"]
+
+        filtered_df = df[df['state_name'].isin(states_to_find)]
+        
+        if filtered_df.empty:
+            return "Could not find data for the specified states. The dataset includes: " + ", ".join(df['state_name'].unique())
+
+        cols_to_sum = ['state_name'] + years_to_find
+        
+        missing_cols = [col for col in cols_to_sum if col not in df.columns]
+        if missing_cols:
+            return f"The dataset is missing the following year columns: {', '.join(missing_cols)}. Available years are: {', '.join(df.columns[2:])}"
+
+        analysis_df = filtered_df[cols_to_sum].copy()
+        
+        analysis_df[years_to_find] = analysis_df[years_to_find].apply(pd.to_numeric, errors='coerce').fillna(0)
+        
+        analysis_df['Total_Devolution_ (2016-18)'] = analysis_df[years_to_find].sum(axis=1)
+        
+        response = f"**Analysis of Union Taxes and Duties Devolved (Figures in Rs. Crore):**\n\n"
+        response += analysis_df.to_markdown(index=False)
+        
+        return response, analysis_df
+
+    except Exception as e:
+        return f"An error occurred during data analysis: {e}\n\n**Raw Data:**\n{df.head().to_markdown()}", None
+
+def analyze_generic_data(df, title):
+    response = f"**Successfully fetched {len(df)} records for '{title}':**\n\n"
+    response += df.to_markdown(index=False)
+    return response, df
+
+if prompt := st.chat_input("Ask a question, e.g., 'Share of Union Taxes'"):
     if not api_key_input:
-        st.error("Please enter your data.gov.in API key above to start.")
-    elif not n8n_url:
-        st.error("Please enter your n8n Webhook URL above to start.")
+        st.error("Please enter your data.gov.in API key.")
+    elif N8N_WEBHOOK_URL == "YOUR_N8N_PRODUCTION_URL_HERE":
+        st.error("Please update the N8N_WEBHOOK_URL in the Python code.")
     else:
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
@@ -130,50 +94,55 @@ if prompt := st.chat_input("Ask a question, e.g., 'Share of Union Taxes in Telan
 
         with st.chat_message("assistant"):
             try:
-                llm = LocalLLM()
-                
                 payload = {
                     "query": prompt,
                     "api_key": api_key_input
                 }
-
-                with st.spinner("1/3: Contacting n8n workflow..."):
-                    response = requests.post(n8n_url, json=payload, timeout=60)
-                    response.raise_for_status() 
-                    
-                with st.spinner("2/3: Receiving data from n8n..."):
-                    data = response.json()
-                    
-                    if "data" in data and "records" in data["data"]:
-                        records = data["data"]["records"]
-                        df = pd.DataFrame(records)
-                        dataset_title = data["data"].get("title", "Untitled Dataset")
-                        resource_id = data.get("resource_id", "N/A")
-                        st.write(f"**Data Retrieval:** Successfully fetched {len(df)} records from '{dataset_title}'.")
-                    
-                    elif "message" in data:
-                        st.error(f"Error from n8n workflow: {data['message']}")
-                        st.session_state.messages.append({"role": "assistant", "content": f"Error from n8n: {data['message']}"})
-                        st.stop()
-                    
-                    else:
-                        st.error(f"Received an unknown response structure from n8n: {data}")
-                        st.session_state.messages.append({"role": "assistant", "content": f"Unknown n8n response: {data}"})
-                        st.stop()
-
-                with st.spinner("3/3: Synthesizing answer using local reasoning engine..."):
-                    final_answer, citations = llm.generate(prompt, df, dataset_title, resource_id)
-                    st.markdown(final_answer)
-                    if citations:
-                        with st.expander("View Data Source"):
-                            st.markdown(citations[0])
                 
-                st.session_state.messages.append({"role": "assistant", "content": final_answer, "citations": citations})
-            
+                with st.spinner("Contacting n8n workflow to find and fetch data..."):
+                    response = requests.post(N8N_WEBHOOK_URL, json=payload, timeout=30)
+                    response.raise_for_status() 
+                    data = response.json()
+                
+                if "error" in data:
+                    st.error(f"Error from n8n workflow: {data.get('message', data.get('error'))}")
+                    st.session_state.messages.append({"role": "assistant", "content": f"Error: {data.get('message', data.get('error'))}"})
+                
+                elif "data" in data and "records" in data["data"]:
+                    records = data["data"]["records"]
+                    df = pd.DataFrame(records)
+                    title = data["data"].get("title", "Dataset")
+                    
+                    analysis_response = ""
+                    analysis_df = None
+
+                    if "tax" in prompt.lower() or "duties" in prompt.lower():
+                        analysis_response, analysis_df = analyze_tax_data(df, prompt.lower())
+                    else:
+                        analysis_response, analysis_df = analyze_generic_data(df, title)
+                    
+                    st.markdown(analysis_response)
+                    if analysis_df is not None:
+                        st.dataframe(analysis_df, use_container_width=True)
+                        st.session_state.messages.append({"role": "assistant", "content": analysis_df})
+                    else:
+                         st.session_state.messages.append({"role": "assistant", "content": analysis_response})
+
+                # *** THIS IS THE NEW, HELPFUL ERROR CHECK ***
+                elif "message" in data and data["message"] == "Workflow was started":
+                    st.error("Error from n8n: The workflow is not 'Active'. Please go to your n8n UI, toggle the workflow to 'Active', and make sure you are using the 'Production URL'.")
+                    st.session_state.messages.append({"role": "assistant", "content": "Error: n8n workflow is not Active. Please Activate the workflow in the n8n UI."})
+
+                else:
+                    st.error(f"Error from n8n workflow: An unknown response was received. {json.dumps(data)}")
+                    st.session_state.messages.append({"role": "assistant", "content": "Error: Unknown response from n8n."})
+
             except requests.exceptions.HTTPError as http_err:
-                st.error(f"HTTP error connecting to n8n: {http_err}")
-            except requests.exceptions.RequestException as e:
-                st.error(f"Failed to contact n8n workflow: {e}")
+                st.error(f"HTTP error occurred: {http_err} - Check if your n8n webhook URL is correct and n8n is running.")
+            except requests.exceptions.ConnectionError as conn_err:
+                st.error(f"Connection error: {conn_err} - Could not connect to the n8n webhook. Is n8n running and the URL correct?")
+            except requests.exceptions.Timeout:
+                st.error("The request to n8n timed out. The workflow may be taking too long to execute.")
             except Exception as e:
                 st.error(f"An unexpected error occurred: {e}")
-                st.session_state.messages.append({"role": "assistant", "content": f"I'm sorry, I ran into an error: {e}"})
+
