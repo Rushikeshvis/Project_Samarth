@@ -1,158 +1,7 @@
 import streamlit as st
 import pandas as pd
 import requests
-import time
-import json
-from io import StringIO
 import re
-
-class QueryPlanner:
-    def __init__(self):
-        self.base_queries = ["rainfall", "crop production", "climate", "agriculture", "agricultural economy", "weather data", "crop yield"]
-        self.states = ["karnataka", "maharashtra", "tamil nadu", "andhra pradesh", "uttar pradesh", "telangana"]
-        self.simple_stop_words = [
-            "a", "an", "the", "in", "on", "at", "for", "to", "of", "with", "by", "is", "are", "was", "were",
-            "compare", "list", "identify", "analyze", "what", "which", "who", "how", "show", "me", "tell",
-            "and", "or", "but", "over", "under", "from", "during", "e.g.", "released", "related", "share",
-            "state", "states", "governments", "government", "released", "data", "dataset", "datasets",
-            "last", "available", "years", "year", "recent", "period", "decade", "find", "get", "info",
-            "information", "about"
-        ]
-
-    def create_plan(self, user_question):
-        time.sleep(0.5)
-        question_low = user_question.lower()
-        
-        found_states = []
-        for s in self.states:
-            if s in question_low:
-                found_states.append(s)
-        
-        no_punc = re.sub(r'[^\w\s]', '', question_low)
-        tokens = no_punc.split()
-        
-        keywords = [
-            word for word in tokens 
-            if word not in self.simple_stop_words 
-            and word not in self.states 
-            and not word.isdigit()
-        ]
-        
-        search_queries = []
-        
-        if keywords:
-            base_search = " ".join(keywords)
-            search_queries.append(base_search)
-            
-            for s in found_states:
-                search_queries.append(f"{base_search} {s}")
-        
-        is_base_query = any(bq in question_low for bq in self.base_queries)
-        
-        if not keywords or is_base_query:
-            for bq in self.base_queries:
-                if bq in question_low:
-                    search_queries.append(bq)
-                    for s in found_states:
-                        search_queries.append(f"{bq} {s}")
-
-        if not search_queries:
-             if keywords:
-                 search_queries = [" ".join(keywords)]
-             else:
-                 search_queries = ["agriculture", "climate"]
-
-        final_queries = list(dict.fromkeys(search_queries))
-        return final_queries[:3]
-
-class DataGovAPI:
-    CATALOG_RESOURCE_ID = "9ef84268-d588-465a-a308-a864a43d0070"
-    BASE_URL = "https://api.data.gov.in"
-
-    def __init__(self, api_key):
-        if not api_key:
-            raise ValueError("API key is required")
-        self.api_key = api_key
-
-    def _make_request(self, url, params):
-        try:
-            response = requests.get(url, params=params, timeout=20)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.HTTPError as http_err:
-            st.error(f"HTTP error occurred: {http_err} - Check your API key or resource ID.")
-        except requests.exceptions.ConnectionError as conn_err:
-            st.error(f"Connection error occurred: {conn_err}")
-        except requests.exceptions.Timeout as timeout_err:
-            st.error(f"Timeout error occurred: {timeout_err}")
-        except requests.exceptions.RequestException as err:
-            st.error(f"An error occurred: {err}")
-        except json.JSONDecodeError:
-            st.error("Failed to decode JSON response from API.")
-        return None
-
-    def search(self, query):
-        time.sleep(1)
-        search_url = f"{self.BASE_URL}/resource/{self.CATALOG_RESOURCE_ID}"
-        params = {
-            "api-key": self.api_key,
-            "format": "json",
-            "filters[title]": query,
-            "limit": 5
-        }
-        
-        data = self._make_request(search_url, params)
-        
-        found_datasets = []
-        if data and "records" in data:
-            for record in data["records"]:
-                if record.get("resource_id") and record.get("title"):
-                    found_datasets.append({
-                        "title": record["title"],
-                        "resource_id": record["resource_id"],
-                        "ministry": record.get("ministry_department", "N/A"),
-                        "description": record.get("desc", "No description provided.")
-                    })
-        return found_datasets
-
-    def fetch(self, resource_id):
-        time.sleep(1.5)
-        resource_url = f"{self.BASE_URL}/resource/{resource_id}"
-        
-        params_total = {
-            "api-key": self.api_key,
-            "format": "json",
-            "limit": 1
-        }
-        
-        meta_data = self._make_request(resource_url, params_total)
-        if not meta_data or "total" not in meta_data:
-            st.warning(f"Could not retrieve total record count for resource {resource_id}.")
-            return pd.DataFrame(), {}
-
-        total_records = meta_data.get("total", 10)
-        
-        params_all = {
-            "api-key": self.api_key,
-            "format": "json",
-            "limit": total_records
-        }
-        
-        full_data = self._make_request(resource_url, params_all)
-        
-        if full_data and "records" in full_data and len(full_data["records"]) > 0:
-            df = pd.DataFrame(full_data["records"])
-            
-            metadata = {
-                "title": full_data.get("title", resource_id),
-                "description": full_data.get("desc", "N/A"),
-                "source": full_data.get("source", "data.gov.in"),
-                "fields": {f.get("name"): f.get("type") for f in full_data.get("field", [])}
-            }
-            return df, metadata
-        
-        st.warning(f"No records found for resource {resource_id} despite metadata success.")
-        return pd.DataFrame(), {}
 
 class LocalLLM:
     def __init__(self):
@@ -175,159 +24,88 @@ class LocalLLM:
     def _clean_numeric(self, series):
         return pd.to_numeric(series.astype(str).str.replace(r'[^\d.]', '', regex=True), errors='coerce')
 
-    def generate(self, user_question, data_context):
-        time.sleep(2)
-        
-        response = "Based on the retrieved data, I have synthesized the following insights:\n\n"
-        citations = []
+    def generate(self, user_question, df, dataset_title, resource_id):
+        response = ""
         question_low = user_question.lower()
-
+        
         try:
-            all_dfs = {}
-            for res_id, (df, meta) in data_context.items():
-                if not df.empty:
-                    all_dfs[res_id] = df
-                    citations.append(f"**{meta.get('title', res_id)}** (Source: {res_id}, data.gov.in)")
-            
-            if not all_dfs:
-                return "I was unable to fetch any data for your query. Please try a different query or check your API key.", []
-
-            if "compare" in question_low and "rainfall" in question_low and "crop" in question_low:
-                response += self._synthesize_rainfall_crop_comparison(all_dfs)
-            elif "highest" in question_low and "production" in question_low:
-                response += self._synthesize_production_leader(all_dfs, question_low)
-            elif "trend" in question_low:
-                response += self._synthesize_trend(all_dfs, question_low)
+            if "tax" in question_low or "duties" in question_low:
+                response = self._analyze_taxes(df, user_question)
+            elif "compare" in question_low and "rainfall" in question_low and "crop" in question_low:
+                response = self._analyze_comparison(df)
             else:
-                response += "I found several datasets. Here is a summary of the data I found:\n\n"
-                for res_id, df in all_dfs.items():
-                    citation_str = next((c for c in citations if res_id in c), f"Source: {res_id}")
-                    response += f"**From {citation_str} (first 5 rows):**\n"
-                    response += f"{df.head().to_markdown(index=False)}\n\n"
+                response = self._default_summary(df, dataset_title)
 
         except Exception as e:
-            response = f"I encountered an error during data synthesis, which can be common with inconsistent live data. Error: {e}\n\nI am displaying the raw data I found instead:\n\n"
-            for res_id, (df, meta) in data_context.items():
-                citation_str = next((c for c in citations if res_id in c), f"**{meta.get('title', res_id)}** (Source: {res_id}, data.gov.in)")
-                response += f"**From {citation_str} (first 5 rows):**\n"
-                response += f"{df.head().to_markdown(index=False)}\n\n"
+            response = f"I encountered an error during data synthesis. Error: {e}\n\n"
+            response += self._default_summary(df, dataset_title)
         
-        return response, list(set(citations))
+        citation = f"**{dataset_title}** (Source: {resource_id}, data.gov.in)"
+        return response, [citation]
 
-    def _synthesize_rainfall_crop_comparison(self, all_dfs):
+    def _analyze_taxes(self, df, user_question):
+        response = ""
+        question_low = user_question.lower()
+
+        cols_to_check = [c for c in df.columns if '2016' in c or '2017' in c or '2018' in c]
+        states_to_check = []
+        if "telangana" in question_low:
+            states_to_check.append("Telangana")
+        if "karnataka" in question_low:
+            states_to_check.append("Karnataka")
+        
+        if not states_to_check:
+            states_to_check = ["Telangana", "Karnataka"] 
+        
+        state_col = "state_name"
+        if state_col not in df.columns:
+            return f"Could not find the required 'state_name' column in the dataset. Available columns: {', '.join(df.columns)}"
+
+        df_filtered = df[df[state_col].isin(states_to_check)]
+        
+        if df_filtered.empty:
+            return f"I found the dataset, but could not find data for {', '.join(states_to_check)}."
+            
+        final_cols = [state_col] + cols_to_check
+        df_display = df_filtered[final_cols].set_index(state_col)
+        
+        response = f"**Share of Union Taxes and Duties (in Rs. Crore) for {', '.join(states_to_check)}:**\n\n"
+        response += df_display.to_markdown()
+        
+        return response
+
+    def _analyze_comparison(self, df):
         response_part = ""
-        rain_analyzed = False
-        crop_analyzed = False
-
-        for res_id, df in all_dfs.items():
-            rain_col = self._find_col(df, "rainfall")
-            state_col = self._find_col(df, "state")
-            year_col = self._find_col(df, "year")
-            
-            if rain_col and state_col and year_col:
-                df[rain_col] = self._clean_numeric(df[rain_col])
-                avg_rain = df.groupby(state_col)[rain_col].mean().reset_index()
-                response_part += "**Average Annual Rainfall Analysis:**\n"
-                for _, row in avg_rain.iterrows():
-                    response_part += f"* **{row[state_col]}**: {row[rain_col]:.2f} mm (average)\n"
-                rain_analyzed = True
-
-            crop_col = self._find_col(df, "crop")
-            prod_col = self._find_col(df, "production")
-            
-            if crop_col and prod_col and state_col:
-                df[prod_col] = self._clean_numeric(df[prod_col])
-                top_crops = df.groupby(state_col)[prod_col].sum().nlargest(3).reset_index()
-                response_part += f"\n**Top Produced Crops (by total {prod_col}):**\n"
-                for _, row in top_crops.iterrows():
-                    response_part += f"* **{row[state_col]}**: {row[prod_col]:.2f} (units as per source)\n"
-                crop_analyzed = True
+        rain_col = self._find_col(df, "rainfall")
+        state_col = self._find_col(df, "state")
         
-        if not rain_analyzed and not crop_analyzed:
-            return "I found data, but could not identify clear columns for both rainfall and crop production by state."
+        if rain_col and state_col:
+            df[rain_col] = self._clean_numeric(df[rain_col])
+            avg_rain = df.groupby(state_col)[rain_col].mean().reset_index()
+            response_part += "**Average Annual Rainfall Analysis:**\n"
+            for _, row in avg_rain.iterrows():
+                response_part += f"* **{row[state_col]}**: {row[rain_col]:.2f} mm (average)\n"
         
         return response_part
 
-    def _synthesize_production_leader(self, all_dfs, question_low):
-        response_part = ""
-        analyzed = False
-        
-        target_state = None
-        if "karnataka" in question_low: target_state = "karnataka"
-        if "maharashtra" in question_low: target_state = "maharashtra"
-        if "state_x" in question_low: target_state = "state_x" 
-
-        for res_id, df in all_dfs.items():
-            prod_col = self._find_col(df, "production")
-            dist_col = self._find_col(df, "district")
-            crop_col = self._find_col(df, "crop")
-            state_col = self._find_col(df, "state")
-            
-            if prod_col and dist_col and crop_col:
-                df[prod_col] = self._clean_numeric(df[prod_col])
-                
-                df_to_analyze = df
-                if target_state and state_col:
-                    if df[state_col].dtype == 'object':
-                        df_to_analyze = df[df[state_col].str.lower() == target_state]
-                    else:
-                         df_to_analyze = df[df[state_col] == target_state]
-
-                if df_to_analyze.empty:
-                    continue
-
-                highest = df_to_analyze.loc[df_to_analyze[prod_col].idxmax()]
-                lowest = df_to_analyze.loc[df_to_analyze[prod_col].idxmin()]
-
-                response_part += f"\n**Production Analysis (from {res_id}):**\n"
-                response_part += f"* **Highest Production:** **{highest[dist_col]}** district produced **{highest[prod_col]}** of **{highest[crop_col]}**.\n"
-                response_part += f"* **Lowest Production:** **{lowest[dist_col]}** district produced **{lowest[prod_col]}** of **{lowest[crop_col]}**.\n"
-                analyzed = True
-                
-        if not analyzed:
-            return "I found data, but could not identify clear columns for production, district, and crop."
-
-        return response_part
-
-    def _synthesize_trend(self, all_dfs, question_low):
-        response_part = ""
-        analyzed = False
-        
-        for res_id, df in all_dfs.items():
-            prod_col = self._find_col(df, "production")
-            year_col = self._find_col(df, "year")
-            crop_col = self._find_col(df, "crop")
-            
-            if prod_col and year_col and crop_col:
-                df[prod_col] = self._clean_numeric(df[prod_col])
-                df[year_col] = df[year_col].astype(str).str.strip()
-                
-                trend = df.groupby(year_col)[prod_col].sum().reset_index().sort_values(by=year_col)
-                
-                if len(trend) > 1:
-                    response_part += f"\n**Production Trend Analysis (from {res_id}):**\n"
-                    response_part += f"{trend.to_markdown(index=False)}\n\n"
-                    
-                    start_year, start_val = trend.iloc[0][year_col], trend.iloc[0][prod_col]
-                    end_year, end_val = trend.iloc[-1][year_col], trend.iloc[-1][prod_col]
-                    
-                    if pd.notna(start_val) and pd.notna(end_val) and start_val > 0:
-                        change = ((end_val - start_val) / start_val) * 100
-                        response_part += f"Overall trend from {start_year} to {end_year} shows a **{change:.2f}% change** in production.\n"
-                    analyzed = True
-
-        if not analyzed:
-            return "I found data, but could not identify clear columns for production, year, and crop to analyze a trend."
-        return response_part
+    def _default_summary(self, df, dataset_title):
+        response = f"I have successfully retrieved the dataset **'{dataset_title}'**. Here is a summary of the first 5 rows:\n\n"
+        response += f"{df.head().to_markdown(index=False)}\n"
+        return response
 
 st.set_page_config(layout="wide", page_title="Project Samarth")
-st.title("🇮🇳 Project Samarth")
-st.markdown("An intelligent Q&A system for India's agricultural economy and climate data, powered by `data.gov.in`.")
+st.title("🇮🇳 Project Samarth (n8n Connected)")
+st.markdown("This system uses an n8n workflow for data retrieval and a local LLM for reasoning.")
+
+n8n_url = st.text_input(
+    "Enter your n8n Webhook Production URL",
+    help="Paste the 'Production URL' from your n8n Webhook node."
+)
 
 api_key_input = st.text_input(
     "Enter your data.gov.in API Key",
     type="password",
-    help="You must generate a free API key from https://data.gov.in/ to use this app."
+    help="You must generate a free API key from https://data.gov.in/."
 )
 
 if "messages" not in st.session_state:
@@ -337,13 +115,14 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         if "citations" in message and message["citations"]:
-            with st.expander("View Data Sources"):
-                for citation in message["citations"]:
-                    st.markdown(f"- {citation}")
+            with st.expander("View Data Source"):
+                st.markdown(message["citations"][0])
 
 if prompt := st.chat_input("Ask a question, e.g., 'Share of Union Taxes in Telangana'"):
     if not api_key_input:
         st.error("Please enter your data.gov.in API key above to start.")
+    elif not n8n_url:
+        st.error("Please enter your n8n Webhook URL above to start.")
     else:
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
@@ -351,58 +130,50 @@ if prompt := st.chat_input("Ask a question, e.g., 'Share of Union Taxes in Telan
 
         with st.chat_message("assistant"):
             try:
-                planner = QueryPlanner()
-                api = DataGovAPI(api_key=api_key_input)
                 llm = LocalLLM()
+                
+                payload = {
+                    "query": prompt,
+                    "api_key": api_key_input
+                }
 
-                with st.spinner("1/4: Analyzing question and creating data plan..."):
-                    search_queries = planner.create_plan(prompt)
-                    st.write(f"**Data Plan:** I will search for datasets related to: `{', '.join(search_queries)}`")
-
-                with st.spinner(f"2/4: Searching data.gov.in for {len(search_queries)} queries..."):
-                    all_found_datasets = []
-                    for query in search_queries:
-                        found = api.search(query)
-                        all_found_datasets.extend(found)
+                with st.spinner("1/3: Contacting n8n workflow..."):
+                    response = requests.post(n8n_url, json=payload, timeout=60)
+                    response.raise_for_status() 
                     
-                    unique_datasets = {d["resource_id"]: d for d in all_found_datasets}.values()
+                with st.spinner("2/3: Receiving data from n8n..."):
+                    data = response.json()
                     
-                    if not unique_datasets:
-                        st.error("No relevant datasets were found on data.gov.in for your query.")
-                        st.session_state.messages.append({"role": "assistant", "content": "No relevant datasets were found on data.gov.in for your query."})
+                    if "data" in data and "records" in data["data"]:
+                        records = data["data"]["records"]
+                        df = pd.DataFrame(records)
+                        dataset_title = data["data"].get("title", "Untitled Dataset")
+                        resource_id = data.get("resource_id", "N/A")
+                        st.write(f"**Data Retrieval:** Successfully fetched {len(df)} records from '{dataset_title}'.")
+                    
+                    elif "message" in data:
+                        st.error(f"Error from n8n workflow: {data['message']}")
+                        st.session_state.messages.append({"role": "assistant", "content": f"Error from n8n: {data['message']}"})
                         st.stop()
                     
-                    st.write(f"**Data Discovery:** Found {len(unique_datasets)} unique, relevant datasets.")
-                    with st.expander("View discovered datasets"):
-                        for d in unique_datasets:
-                            st.markdown(f"**{d['title']}** ({d['ministry']})\n*ID: {d['resource_id']}*")
-
-                with st.spinner(f"3/4: Fetching live data for {len(unique_datasets)} datasets... (This may take a moment)"):
-                    data_context = {}
-                    for i, dataset in enumerate(unique_datasets):
-                        st.write(f"Fetching {i+1}/{len(unique_datasets)}: {dataset['title'][:50]}...")
-                        df, metadata = api.fetch(dataset["resource_id"])
-                        if not df.empty:
-                            data_context[dataset["resource_id"]] = (df, metadata)
-                    
-                    if not data_context:
-                        st.error("Data was discovered, but I failed to fetch any records. This can be due to API issues or empty datasets.")
-                        st.session_state.messages.append({"role": "assistant", "content": "Data was discovered, but I failed to fetch any records. This can be due to API issues or empty datasets."})
+                    else:
+                        st.error(f"Received an unknown response structure from n8n: {data}")
+                        st.session_state.messages.append({"role": "assistant", "content": f"Unknown n8n response: {data}"})
                         st.stop()
 
-                    st.write(f"**Data Retrieval:** Successfully fetched and loaded {len(data_context)} datasets.")
-
-                with st.spinner("4/4: Synthesizing answer using local reasoning engine..."):
-                    final_answer, citations = llm.generate(prompt, data_context)
+                with st.spinner("3/3: Synthesizing answer using local reasoning engine..."):
+                    final_answer, citations = llm.generate(prompt, df, dataset_title, resource_id)
                     st.markdown(final_answer)
                     if citations:
-                        with st.expander("View Data Sources"):
-                            for citation in citations:
-                                st.markdown(f"- {citation}")
+                        with st.expander("View Data Source"):
+                            st.markdown(citations[0])
                 
                 st.session_state.messages.append({"role": "assistant", "content": final_answer, "citations": citations})
             
+            except requests.exceptions.HTTPError as http_err:
+                st.error(f"HTTP error connecting to n8n: {http_err}")
+            except requests.exceptions.RequestException as e:
+                st.error(f"Failed to contact n8n workflow: {e}")
             except Exception as e:
                 st.error(f"An unexpected error occurred: {e}")
                 st.session_state.messages.append({"role": "assistant", "content": f"I'm sorry, I ran into an error: {e}"})
-
