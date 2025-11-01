@@ -8,7 +8,7 @@ import json
 # !! IMPORTANT !!
 # This is the "Production URL" from your n8n Webhook node
 # Make sure your n8n workflow is "Active"
-N8N_WEBHOOK_URL = "YOUR_N8N_PRODUCTION_URL_HERE" 
+N8N_WEBHOOK_URL = "https://ghost-n8n-4baj.onrender.com/webhook/samarth-query" 
 # -----------------------------------------------------------------
 
 st.set_page_config(layout="wide", page_title="Project Samarth (n8n)")
