@@ -98,7 +98,7 @@ st.title("🇮🇳 Project Samarth (n8n Connected)")
 st.markdown("This system uses an n8n workflow for data retrieval and a local LLM for reasoning.")
 
 n8n_url = st.text_input(
-    "https://ghost-n8n-4baj.onrender.com/webhook-test/samarth-query",
+    "Enter your webhook URL",
     help="Paste the 'Production URL' from your n8n Webhook node."
 )
 
